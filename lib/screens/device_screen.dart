@@ -2,35 +2,42 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:robi_live/rsrcp_impl/rsrc_frame.dart';
+import 'package:robi_live/utils/extra.dart';
+import 'package:robi_live/utils/robi_config.dart';
+import 'package:robi_live/widgets/rsrc_visulization.dart';
 
-import '../widgets/service_tile.dart';
-import '../widgets/characteristic_tile.dart';
-import '../widgets/descriptor_tile.dart';
-import '../utils/snackbar.dart';
-import '../utils/extra.dart';
+import '../rsrcp_impl/rsrc_handshake.dart';
+import '../utils/logger.dart';
+import '../widgets/mini_log.dart';
+import '../widgets/rssi_monitor.dart';
 
 class DeviceScreen extends StatefulWidget {
   final BluetoothDevice device;
 
-  const DeviceScreen({Key? key, required this.device}) : super(key: key);
+  const DeviceScreen({super.key, required this.device});
 
   @override
   State<DeviceScreen> createState() => _DeviceScreenState();
 }
 
 class _DeviceScreenState extends State<DeviceScreen> {
-  int? _rssi;
-  int? _mtuSize;
   BluetoothConnectionState _connectionState = BluetoothConnectionState.disconnected;
-  List<BluetoothService> _services = [];
-  bool _isDiscoveringServices = false;
   bool _isConnecting = false;
   bool _isDisconnecting = false;
+  bool _isDiscoveringServices = false;
 
   late StreamSubscription<BluetoothConnectionState> _connectionStateSubscription;
   late StreamSubscription<bool> _isConnectingSubscription;
   late StreamSubscription<bool> _isDisconnectingSubscription;
-  late StreamSubscription<int> _mtuSubscription;
+
+  // Characteristics
+  BluetoothCharacteristic? _rsrcCharacteristic, _startConfirmationCharacteristic, _rsrcHandshakeCharacteristic;
+
+  RSRCHandshake? _rsrcHandshake;
+  final List<RSRCFrame> _rsrcFrames = [];
+
+  final List<LogMessage> logMessages = [];
 
   @override
   void initState() {
@@ -39,18 +46,9 @@ class _DeviceScreenState extends State<DeviceScreen> {
     _connectionStateSubscription = widget.device.connectionState.listen((state) async {
       _connectionState = state;
       if (state == BluetoothConnectionState.connected) {
-        _services = []; // must rediscover services
+        logSuccess("Connected");
+        postConnectionSequence();
       }
-      if (state == BluetoothConnectionState.connected && _rssi == null) {
-        _rssi = await widget.device.readRssi();
-      }
-      if (mounted) {
-        setState(() {});
-      }
-    });
-
-    _mtuSubscription = widget.device.mtu.listen((value) {
-      _mtuSize = value;
       if (mounted) {
         setState(() {});
       }
@@ -58,6 +56,9 @@ class _DeviceScreenState extends State<DeviceScreen> {
 
     _isConnectingSubscription = widget.device.isConnecting.listen((value) {
       _isConnecting = value;
+      if (_isConnecting) {
+        logInfo("Connecting...");
+      }
       if (mounted) {
         setState(() {});
       }
@@ -65,35 +66,174 @@ class _DeviceScreenState extends State<DeviceScreen> {
 
     _isDisconnectingSubscription = widget.device.isDisconnecting.listen((value) {
       _isDisconnecting = value;
+      if (_isDisconnecting) {
+        logInfo("Disconnecting...");
+      }
       if (mounted) {
         setState(() {});
       }
     });
   }
 
+  Future<void> postConnectionSequence() async {
+    bool success;
+    success = await discoverServices();
+    if (!success) return;
+    success = await readRSRCHandshakeCharacteristic();
+    if (!success) return;
+    await sendStartConfirmation();
+  }
+
   @override
   void dispose() {
     _connectionStateSubscription.cancel();
-    _mtuSubscription.cancel();
     _isConnectingSubscription.cancel();
     _isDisconnectingSubscription.cancel();
     super.dispose();
   }
 
-  bool get isConnected {
-    return _connectionState == BluetoothConnectionState.connected;
+  void addLogMsg(String msg, IconData icon, Color color) {
+    if (mounted) setState(() => logMessages.add(LogMessage(icon: icon, message: msg, color: color)));
+  }
+
+  void logSuccess(String msg) => addLogMsg(msg, Icons.check_circle, Colors.green);
+
+  void logInfo(String msg) => addLogMsg(msg, Icons.info, Colors.transparent);
+
+  void logException(String prefix, Object e) => logError('$prefix ${e.toString()}');
+
+  void logError(String msg) => addLogMsg(msg, Icons.error, Colors.red);
+
+  void logWarning(String msg) => addLogMsg(msg, Icons.warning, Colors.yellow);
+
+  bool get isConnected => _connectionState == BluetoothConnectionState.connected;
+
+  bool get enableAnyControl => isConnected;
+
+  Future<bool> discoverServices() async {
+    logInfo("Discovering services...");
+
+    setState(() {
+      _isDiscoveringServices = true;
+    });
+
+    final services = await widget.device.discoverServices();
+
+    for (final service in services) {
+      if (service.serviceUuid == rsrcServiceGuid) {
+        logSuccess("Discovered RSRC service");
+
+        for (final characteristic in service.characteristics) {
+          if (characteristic.uuid == rsrcCharacteristicGuid) {
+            logSuccess("Discovered RSRC characteristic");
+
+            _rsrcCharacteristic = characteristic;
+
+            final subscription = _rsrcCharacteristic!.onValueReceived.listen((value) {
+              if (!mounted) return;
+              logInfo("RSRC frame: $value");
+              final frame = RSRCFrame.fromBytes(value);
+              if (frame != null) {
+                setState(() {
+                  _rsrcFrames.add(frame);
+                });
+              } else {
+                logError("RSRC frame parsing failed");
+              }
+            });
+
+            widget.device.cancelWhenDisconnected(subscription);
+
+            logInfo("Setting notify to RSRC characteristic...");
+            try {
+              await _rsrcCharacteristic!.setNotifyValue(true, timeout: 5);
+              logSuccess("Notify set");
+            } catch (e) {
+              logException("Notify Error:", e);
+            }
+          } else if (characteristic.uuid == startConfirmationCharacteristicGuid) {
+            logSuccess("Discovered RSRC confirmation service");
+            _startConfirmationCharacteristic = characteristic;
+          } else if (characteristic.uuid == rsrcHandshakeCharacteristicGuid) {
+            logSuccess("Discovered RSRC handshake characteristic");
+            _rsrcHandshakeCharacteristic = characteristic;
+          } else {
+            logWarning("Unknown characteristic: ${characteristic.uuid.str}");
+          }
+        }
+      } else {
+        logWarning("Discovered unknown service: ${service.serviceUuid.str}");
+      }
+    }
+
+    if (_rsrcCharacteristic == null) {
+      logError("RSRC characteristic not found");
+    }
+
+    if (_startConfirmationCharacteristic == null) {
+      logError("RSRC confirmation characteristic not found");
+    }
+
+    if (_rsrcHandshakeCharacteristic == null) {
+      logError("RSRC handshake characteristic not found");
+    }
+
+    logInfo("Services discovery completed");
+
+    setState(() {
+      _isDiscoveringServices = false;
+    });
+
+    return _rsrcCharacteristic != null && _startConfirmationCharacteristic != null && _rsrcHandshakeCharacteristic != null;
+  }
+
+  Future<bool> readRSRCHandshakeCharacteristic() async {
+    logInfo("Reading RSRC handshake...");
+    late final List<int> rsrcHandshakeBytes;
+    try {
+      rsrcHandshakeBytes = await _rsrcHandshakeCharacteristic!.read();
+      logSuccess("RSRC handshake read");
+    } catch (e) {
+      logException("Read Error:", e);
+      return false;
+    }
+
+    logInfo("Parsing RSRC handshake...");
+    _rsrcHandshake = RSRCHandshake.fromBytes(rsrcHandshakeBytes);
+
+    if (_rsrcHandshake == null) {
+      logError("RSRC handshake parsing failed");
+      return false;
+    }
+
+    logSuccess("RSRC handshake parsed");
+
+    logInfo("Handshake data: $_rsrcHandshake");
+
+    return true;
+  }
+
+  Future<bool> sendStartConfirmation() async {
+    logInfo("Sending start confirmation...");
+    try {
+      await _startConfirmationCharacteristic!.write([0x01], withoutResponse: _startConfirmationCharacteristic!.properties.writeWithoutResponse);
+    } catch (e) {
+      logException("Start confirmation Error:", e);
+      return false;
+    }
+    logSuccess("Start confirmation sent");
+    return true;
   }
 
   Future onConnectPressed() async {
     try {
       await widget.device.connectAndUpdateStream();
-      Snackbar.show(ABC.c, "Connect: Success", success: true);
+      logSuccess("Connect: Success");
     } catch (e) {
       if (e is FlutterBluePlusException && e.code == FbpErrorCode.connectionCanceled.index) {
         // ignore connections canceled by the user
       } else {
-        Snackbar.show(ABC.c, prettyException("Connect Error:", e), success: false);
-        print(e);
+        logException("Connect Error:", e);
       }
     }
   }
@@ -101,168 +241,97 @@ class _DeviceScreenState extends State<DeviceScreen> {
   Future onCancelPressed() async {
     try {
       await widget.device.disconnectAndUpdateStream(queue: false);
-      Snackbar.show(ABC.c, "Cancel: Success", success: true);
+      logSuccess("Cancel: Success");
     } catch (e) {
-      Snackbar.show(ABC.c, prettyException("Cancel Error:", e), success: false);
-      print(e);
+      logException("Cancel Error:", e);
     }
   }
 
   Future onDisconnectPressed() async {
     try {
       await widget.device.disconnectAndUpdateStream();
-      Snackbar.show(ABC.c, "Disconnect: Success", success: true);
+      logSuccess("Disconnect: Success");
     } catch (e) {
-      Snackbar.show(ABC.c, prettyException("Disconnect Error:", e), success: false);
-      print(e);
+      logException("Disconnect Error:", e);
     }
-  }
-
-  Future onDiscoverServicesPressed() async {
-    if (mounted) {
-      setState(() {
-        _isDiscoveringServices = true;
-      });
-    }
-    try {
-      _services = await widget.device.discoverServices();
-      Snackbar.show(ABC.c, "Discover Services: Success", success: true);
-    } catch (e) {
-      Snackbar.show(ABC.c, prettyException("Discover Services Error:", e), success: false);
-      print(e);
-    }
-    if (mounted) {
-      setState(() {
-        _isDiscoveringServices = false;
-      });
-    }
-  }
-
-  Future onRequestMtuPressed() async {
-    try {
-      await widget.device.requestMtu(223, predelay: 0);
-      Snackbar.show(ABC.c, "Request Mtu: Success", success: true);
-    } catch (e) {
-      Snackbar.show(ABC.c, prettyException("Change Mtu Error:", e), success: false);
-      print(e);
-    }
-  }
-
-  List<Widget> _buildServiceTiles(BuildContext context, BluetoothDevice d) {
-    return _services
-        .map(
-          (s) => ServiceTile(
-            service: s,
-            characteristicTiles: s.characteristics.map((c) => _buildCharacteristicTile(c)).toList(),
-          ),
-        )
-        .toList();
-  }
-
-  CharacteristicTile _buildCharacteristicTile(BluetoothCharacteristic c) {
-    return CharacteristicTile(
-      characteristic: c,
-      descriptorTiles: c.descriptors.map((d) => DescriptorTile(descriptor: d)).toList(),
-    );
-  }
-
-  Widget buildSpinner(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(14.0),
-      child: AspectRatio(
-        aspectRatio: 1.0,
-        child: CircularProgressIndicator(
-          backgroundColor: Colors.black12,
-          color: Colors.black26,
-        ),
-      ),
-    );
-  }
-
-  Widget buildRemoteId(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(8.0),
-      child: Text('${widget.device.remoteId}'),
-    );
-  }
-
-  Widget buildRssiTile(BuildContext context) {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        isConnected ? const Icon(Icons.bluetooth_connected) : const Icon(Icons.bluetooth_disabled),
-        Text(((isConnected && _rssi != null) ? '${_rssi!} dBm' : ''), style: Theme.of(context).textTheme.bodySmall)
-      ],
-    );
-  }
-
-  Widget buildGetServices(BuildContext context) {
-    return IndexedStack(
-      index: (_isDiscoveringServices) ? 1 : 0,
-      children: <Widget>[
-        TextButton(
-          child: const Text("Get Services"),
-          onPressed: onDiscoverServicesPressed,
-        ),
-        const IconButton(
-          icon: SizedBox(
-            child: CircularProgressIndicator(
-              valueColor: AlwaysStoppedAnimation(Colors.grey),
-            ),
-            width: 18.0,
-            height: 18.0,
-          ),
-          onPressed: null,
-        )
-      ],
-    );
-  }
-
-  Widget buildMtuTile(BuildContext context) {
-    return ListTile(
-        title: const Text('MTU Size'),
-        subtitle: Text('$_mtuSize bytes'),
-        trailing: IconButton(
-          icon: const Icon(Icons.edit),
-          onPressed: onRequestMtuPressed,
-        ));
   }
 
   Widget buildConnectButton(BuildContext context) {
-    return Row(children: [
-      if (_isConnecting || _isDisconnecting) buildSpinner(context),
-      TextButton(
-          onPressed: _isConnecting ? onCancelPressed : (isConnected ? onDisconnectPressed : onConnectPressed),
-          child: Text(
-            _isConnecting ? "CANCEL" : (isConnected ? "DISCONNECT" : "CONNECT"),
-            style: Theme.of(context).primaryTextTheme.labelLarge?.copyWith(color: Colors.white),
-          ))
-    ]);
+    if (_isConnecting || _isDisconnecting) {
+      return Stack(
+        alignment: Alignment.center,
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(),
+            ),
+          ),
+          if (_isConnecting)
+            IconButton(
+              onPressed: () => onCancelPressed(),
+              icon: Icon(Icons.cancel),
+            )
+        ],
+      );
+    }
+
+    if (isConnected) {
+      return IconButton.filled(
+        style: IconButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white),
+        icon: Icon(Icons.bluetooth_connected),
+        onPressed: onDisconnectPressed,
+      );
+    }
+
+    return IconButton(
+      style: IconButton.styleFrom(
+        backgroundColor: Colors.red,
+        foregroundColor: Colors.white,
+      ),
+      onPressed: onConnectPressed,
+      icon: Icon(Icons.bluetooth),
+    );
+  }
+
+  Future<bool> writeToCharacteristic(BluetoothCharacteristic characteristic, List<int> data) async {
+    try {
+      await characteristic.write(data, withoutResponse: characteristic.properties.writeWithoutResponse);
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    return ScaffoldMessenger(
-      key: Snackbar.snackBarKeyC,
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text(widget.device.platformName),
-          actions: [buildConnectButton(context)],
-        ),
-        body: SingleChildScrollView(
-          child: Column(
-            children: <Widget>[
-              buildRemoteId(context),
-              ListTile(
-                leading: buildRssiTile(context),
-                title: Text('Device is ${_connectionState.toString().split('.')[1]}.'),
-                trailing: buildGetServices(context),
+    return Scaffold(
+      appBar: AppBar(
+        actions: [
+          RssiMonitor(device: widget.device),
+          buildConnectButton(context),
+          SizedBox(width: 5),
+        ],
+      ),
+      body: Stack(
+        fit: StackFit.expand,
+        children: <Widget>[
+          if (logMessages.isNotEmpty)
+            Align(
+              alignment: Alignment.topRight,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: 200,
+                  minWidth: 200,
+                  maxWidth: 200,
+                ),
+                child: MiniLog(logMessages: logMessages),
               ),
-              buildMtuTile(context),
-              ..._buildServiceTiles(context, widget.device),
-            ],
-          ),
-        ),
+            ),
+          if (_rsrcHandshake != null && _rsrcFrames.isNotEmpty) RSRCVisualizationWidget(rsrcHandshake: _rsrcHandshake!, rsrcFrames: _rsrcFrames),
+        ],
       ),
     );
   }
