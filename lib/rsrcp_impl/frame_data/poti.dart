@@ -3,7 +3,7 @@ import 'package:robi_live/rsrcp_impl/frame_data/abstract.dart';
 class PotiFrameData extends AbstractFrameData {
   static const int reservedBytes = 1;
 
-  final int value;
+  final double value;
 
   const PotiFrameData({required this.value});
 
@@ -13,6 +13,6 @@ class PotiFrameData extends AbstractFrameData {
       return null;
     }
 
-    return PotiFrameData(value: bytes[0]);
+    return PotiFrameData(value: bytes[0] / 255);
   }
 }
