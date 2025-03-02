@@ -1,5 +1,6 @@
 import 'package:robi_live/rsrcp_impl/frame_data/buttons.dart';
 import 'package:robi_live/rsrcp_impl/frame_data/enabled_feature_set.dart';
+import 'package:robi_live/rsrcp_impl/frame_data/motors.dart';
 import 'package:robi_live/rsrcp_impl/frame_data/poti.dart';
 import 'package:robi_live/rsrcp_impl/utils.dart';
 
@@ -13,12 +14,14 @@ class RSRCFrame {
   final EnabledFeatureSetFrameData enabledFeatureSetFrameData;
   final PotiFrameData? potiFrameData;
   final ButtonsFrameData? buttonsFrameData;
+  final MotorsFrameData? motorsFrameData;
 
   const RSRCFrame({
     required this.frameId,
     required this.enabledFeatureSetFrameData,
     this.potiFrameData,
     this.buttonsFrameData,
+    this.motorsFrameData,
   });
 
   static RSRCFrame? fromBytes(List<int> bytes) {
@@ -43,10 +46,15 @@ class RSRCFrame {
 
     PotiFrameData? potiFrameData;
     ButtonsFrameData? buttonsFrameData;
+    MotorsFrameData? motorsFrameData;
 
     if (enabledFeatureSetFrameData.enableVoltages) {}
 
-    if (enabledFeatureSetFrameData.enableMotorStates) {}
+    if (enabledFeatureSetFrameData.enableMotorStates) {
+      final motorsFrameDataBytes = featureBytes.sublist(featureReaderIndex, featureReaderIndex + MotorsFrameData.reservedBytes);
+      motorsFrameData = MotorsFrameData.fromBytes(motorsFrameDataBytes);
+      featureReaderIndex += MotorsFrameData.reservedBytes;
+    }
 
     if (enabledFeatureSetFrameData.enableGyroscopeState) {}
 
@@ -79,6 +87,7 @@ class RSRCFrame {
       enabledFeatureSetFrameData: enabledFeatureSetFrameData,
       potiFrameData: potiFrameData,
       buttonsFrameData: buttonsFrameData,
+      motorsFrameData: motorsFrameData,
     );
   }
 }

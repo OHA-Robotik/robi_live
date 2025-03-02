@@ -19,6 +19,10 @@ class RSRCVisualizationWidget extends StatelessWidget {
           Text("Right Button ${rsrcFrames.last.buttonsFrameData!.isRightButtonPressed ? 'Pressed' : 'Not Pressed'}"),
           Text("Top Button ${rsrcFrames.last.buttonsFrameData!.isUpButtonPressed ? 'Pressed' : 'Not Pressed'}"),
           Text("Bottom Button ${rsrcFrames.last.buttonsFrameData!.isDownButtonPressed ? 'Pressed' : 'Not Pressed'}"),
+        ],
+        if (rsrcFrames.last.motorsFrameData != null) ... [
+          Text("Left Motor Angular Velocity: ${rsrcFrames.last.motorsFrameData!.leftMotorAngularVelocity}rad/s"),
+          Text("Right Motor Angular Velocity: ${rsrcFrames.last.motorsFrameData!.rightMotorAngularVelocity}rad/s"),
         ]
       ],
     );
