@@ -11,7 +11,7 @@ import 'screens/bluetooth_off_screen.dart';
 import 'screens/scan_screen.dart';
 
 void main() {
-  FlutterBluePlus.setLogLevel(LogLevel.verbose, color: true);
+  FlutterBluePlus.setLogLevel(LogLevel.warning, color: true);
   runApp(const FlutterBlueApp());
 }
 
@@ -57,6 +57,16 @@ class _FlutterBlueAppState extends State<FlutterBlueApp> {
     return MaterialApp(
       color: Colors.lightBlue,
       home: screen,
+      theme: ThemeData.light(
+        useMaterial3: true,
+      ).copyWith(
+        colorScheme: ColorScheme.fromSwatch(primarySwatch: Colors.cyan),
+        sliderTheme: SliderTheme.of(context).copyWith(
+          activeTrackColor: Colors.white,
+          thumbShape: RoundSliderThumbShape(enabledThumbRadius: 30),
+          trackHeight: 40,
+        ),
+      ),
       debugShowCheckedModeBanner: false,
       navigatorObservers: [BluetoothAdapterStateObserver()],
     );

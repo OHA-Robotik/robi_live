@@ -5,6 +5,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:robi_live/rsrcp_impl/rsrc_frame.dart';
 import 'package:robi_live/utils/extra.dart';
 import 'package:robi_live/utils/robi_config.dart';
+import 'package:robi_live/widgets/remote_control.dart';
 import 'package:robi_live/widgets/rsrc_visulization.dart';
 
 import '../rsrcp_impl/rsrc_handshake.dart';
@@ -31,13 +32,17 @@ class _DeviceScreenState extends State<DeviceScreen> {
   late StreamSubscription<bool> _isConnectingSubscription;
   late StreamSubscription<bool> _isDisconnectingSubscription;
 
+  int currentVelocityData = 0, currentSteeringData = 255 ~/ 2;
+
   // Characteristics
-  BluetoothCharacteristic? _rsrcCharacteristic, _startConfirmationCharacteristic, _rsrcHandshakeCharacteristic;
+  BluetoothCharacteristic? _rsrcCharacteristic, _startConfirmationCharacteristic, _rsrcHandshakeCharacteristic, _remoteControlVelocityCharacteristic, _remoteControlSteeringCharacteristic;
 
   RSRCHandshake? _rsrcHandshake;
   final List<RSRCFrame> _rsrcFrames = [];
 
   final List<LogMessage> logMessages = [];
+
+  bool get enableAnyControls => isConnected;
 
   @override
   void initState() {
@@ -77,8 +82,9 @@ class _DeviceScreenState extends State<DeviceScreen> {
 
   Future<void> postConnectionSequence() async {
     bool success;
-    success = await discoverServices();
-    if (!success) return;
+    sendRemoteControlCommandsRoutine();
+    readRSRCCharacteristiscsRoutine();
+    await discoverServices();
     success = await readRSRCHandshakeCharacteristic();
     if (!success) return;
     await sendStartConfirmation();
@@ -110,7 +116,7 @@ class _DeviceScreenState extends State<DeviceScreen> {
 
   bool get enableAnyControl => isConnected;
 
-  Future<bool> discoverServices() async {
+  Future<void> discoverServices() async {
     logInfo("Discovering services...");
 
     setState(() {
@@ -119,6 +125,8 @@ class _DeviceScreenState extends State<DeviceScreen> {
 
     final services = await widget.device.discoverServices();
 
+    print("services: $services");
+
     for (final service in services) {
       if (service.serviceUuid == rsrcServiceGuid) {
         logSuccess("Discovered RSRC service");
@@ -126,37 +134,26 @@ class _DeviceScreenState extends State<DeviceScreen> {
         for (final characteristic in service.characteristics) {
           if (characteristic.uuid == rsrcCharacteristicGuid) {
             logSuccess("Discovered RSRC characteristic");
-
             _rsrcCharacteristic = characteristic;
-
-            final subscription = _rsrcCharacteristic!.onValueReceived.listen((value) {
-              if (!mounted) return;
-              logInfo("RSRC frame: $value");
-              final frame = RSRCFrame.fromBytes(value);
-              if (frame != null) {
-                setState(() {
-                  _rsrcFrames.add(frame);
-                });
-              } else {
-                logError("RSRC frame parsing failed");
-              }
-            });
-
-            widget.device.cancelWhenDisconnected(subscription);
-
-            logInfo("Setting notify to RSRC characteristic...");
-            try {
-              await _rsrcCharacteristic!.setNotifyValue(true, timeout: 5);
-              logSuccess("Notify set");
-            } catch (e) {
-              logException("Notify Error:", e);
-            }
           } else if (characteristic.uuid == startConfirmationCharacteristicGuid) {
             logSuccess("Discovered RSRC confirmation service");
             _startConfirmationCharacteristic = characteristic;
           } else if (characteristic.uuid == rsrcHandshakeCharacteristicGuid) {
             logSuccess("Discovered RSRC handshake characteristic");
             _rsrcHandshakeCharacteristic = characteristic;
+          } else {
+            logWarning("Unknown characteristic: ${characteristic.uuid.str}");
+          }
+        }
+      } else if (service.serviceUuid == remoteControlServiceGuid) {
+        logSuccess("Discovered remote control service");
+        for (final characteristic in service.characteristics) {
+          if (characteristic.uuid == velocityCharacteristicGuid) {
+            logSuccess("Discovered velocity characteristic");
+            _remoteControlVelocityCharacteristic = characteristic;
+          } else if (characteristic.uuid == steeringCharacteristicGuid) {
+            logSuccess("Discovered steering characteristic");
+            _remoteControlSteeringCharacteristic = characteristic;
           } else {
             logWarning("Unknown characteristic: ${characteristic.uuid.str}");
           }
@@ -178,17 +175,26 @@ class _DeviceScreenState extends State<DeviceScreen> {
       logError("RSRC handshake characteristic not found");
     }
 
+    if (_remoteControlVelocityCharacteristic == null) {
+      logError("Velocity characteristic not found");
+    }
+
+    if (_remoteControlSteeringCharacteristic == null) {
+      logError("Steering characteristic not found");
+    }
+
     logInfo("Services discovery completed");
 
     setState(() {
       _isDiscoveringServices = false;
     });
-
-    return _rsrcCharacteristic != null && _startConfirmationCharacteristic != null && _rsrcHandshakeCharacteristic != null;
   }
 
   Future<bool> readRSRCHandshakeCharacteristic() async {
+    if (_rsrcHandshakeCharacteristic == null) return false;
+
     logInfo("Reading RSRC handshake...");
+
     late final List<int> rsrcHandshakeBytes;
     try {
       rsrcHandshakeBytes = await _rsrcHandshakeCharacteristic!.read();
@@ -215,14 +221,13 @@ class _DeviceScreenState extends State<DeviceScreen> {
 
   Future<bool> sendStartConfirmation() async {
     logInfo("Sending start confirmation...");
-    try {
-      await _startConfirmationCharacteristic!.write([0x01], withoutResponse: _startConfirmationCharacteristic!.properties.writeWithoutResponse);
-    } catch (e) {
-      logException("Start confirmation Error:", e);
-      return false;
+    final success = await writeToCharacteristic(_startConfirmationCharacteristic!, [0x01]);
+    if (success) {
+      logSuccess("Start confirmation sent");
+    } else {
+      logError("Start confirmation failed");
     }
-    logSuccess("Start confirmation sent");
-    return true;
+    return success;
   }
 
   Future onConnectPressed() async {
@@ -296,11 +301,61 @@ class _DeviceScreenState extends State<DeviceScreen> {
     );
   }
 
+  void sendRemoteControlCommandsRoutine() async {
+    logSuccess("Starting remote control routine");
+    while (mounted) {
+      while (enableAnyControl) {
+        await Future.wait([
+          if (_remoteControlVelocityCharacteristic != null) writeToCharacteristic(_remoteControlVelocityCharacteristic!, [currentVelocityData]),
+          if (_remoteControlSteeringCharacteristic != null) writeToCharacteristic(_remoteControlSteeringCharacteristic!, [currentSteeringData]),
+        ]);
+        await Future.delayed(const Duration(milliseconds: 10));
+      }
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+    logWarning("Remote control routine stopped");
+  }
+
+  void readRSRCCharacteristiscsRoutine() async {
+    logSuccess("Starting RSRC read routine");
+    while (mounted) {
+      while (!isConnected) {
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+
+      if (_rsrcCharacteristic == null) {
+        await Future.delayed(const Duration(milliseconds: 100));
+        continue;
+      }
+
+      try {
+        final value = await _rsrcCharacteristic!.read();
+        logInfo("RSRC frame: $value");
+        final frame = RSRCFrame.fromBytes(value);
+
+        if (frame == null) {
+          logError("RSRC frame parsing failed");
+          continue;
+        }
+
+        setState(() {
+          _rsrcFrames.add(frame);
+        });
+      } catch (e) {
+        logException("RSRC read error:", e);
+      }
+
+      await Future.delayed(const Duration(milliseconds: 10));
+    }
+    logWarning("RSRC read routine stopped");
+  }
+
   Future<bool> writeToCharacteristic(BluetoothCharacteristic characteristic, List<int> data) async {
     try {
       await characteristic.write(data, withoutResponse: characteristic.properties.writeWithoutResponse);
       return true;
     } catch (e) {
+      print("Error writing to characteristic: $e");
       return false;
     }
   }
@@ -331,6 +386,12 @@ class _DeviceScreenState extends State<DeviceScreen> {
               ),
             ),
           if (_rsrcHandshake != null && _rsrcFrames.isNotEmpty) RSRCVisualizationWidget(rsrcHandshake: _rsrcHandshake!, rsrcFrames: _rsrcFrames),
+          RemoteController(
+            disableSteeringControls: !enableAnyControls || _remoteControlSteeringCharacteristic == null,
+            disableVelocityControls: !enableAnyControls || _remoteControlVelocityCharacteristic == null,
+            onVelocityChange: (velocity) => currentVelocityData = (velocity * 255).toInt(),
+            onSteerChange: (steer) => currentSteeringData = ((steer + 1) / 2 * 255).toInt(),
+          ),
         ],
       ),
     );
