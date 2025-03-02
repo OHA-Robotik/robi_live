@@ -19,13 +19,10 @@ class MotorsFrameData extends AbstractFrameData {
       return null;
     }
 
-    final uint8List = Uint8List.fromList(bytes);
+    final byteData = ByteData.sublistView(Uint8List.fromList(bytes), 0, 4);
 
-    final leftMotorByteData = ByteData.sublistView(uint8List, 0, 2);
-    final rightMotorByteData = ByteData.sublistView(uint8List, 2, 4);
-
-    final leftMotorAngularVelocity = leftMotorByteData.getInt16(0, Endian.big) / scaleFactor;
-    final rightMotorAngularVelocity = rightMotorByteData.getInt16(0, Endian.big) / scaleFactor;
+    final leftMotorAngularVelocity = byteData.getInt16(0) / scaleFactor;
+    final rightMotorAngularVelocity = byteData.getInt16(2) / scaleFactor;
 
     return MotorsFrameData(
       leftMotorAngularVelocity: leftMotorAngularVelocity,
